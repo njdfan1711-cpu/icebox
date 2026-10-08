@@ -1,0 +1,210 @@
+name: Build Icebox TV APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Write Android project files
+        run: |
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Icebox"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.icebox.tv"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.icebox.tv"
+                  minSdk = 22
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.media3:media3-exoplayer:1.3.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
+              implementation("androidx.media3:media3-ui:1.3.1")
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <application
+                  android:label="Icebox"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity
+                      android:name=".PlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden" />
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/icebox/tv
+          cat > app/src/main/java/com/icebox/tv/MainActivity.kt <<'EOF'
+          package com.icebox.tv
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.settings.mediaPlaybackRequiresUserGesture = false
+                  web.webViewClient = WebViewClient()
+                  web.webChromeClient = WebChromeClient()
+                  web.addJavascriptInterface(Bridge(), "IceboxNative")
+                  web.setBackgroundColor(0xFF0D1722.toInt())
+                  setContentView(web)
+                  web.requestFocus()
+                  web.loadUrl(BASE_URL)
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun play(url: String) {
+                      val i = Intent(this@MainActivity, PlayerActivity::class.java)
+                      i.putExtra("url", url)
+                      startActivity(i)
+                  }
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  if (web.canGoBack()) web.goBack() else super.onBackPressed()
+              }
+
+              companion object {
+                  const val BASE_URL = "https://nhl-azure.vercel.app"
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/icebox/tv
+          cat > app/src/main/java/com/icebox/tv/PlayerActivity.kt <<'EOF'
+          package com.icebox.tv
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.widget.Toast
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.Player
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.ui.PlayerView
+
+          class PlayerActivity : Activity() {
+              private var player: ExoPlayer? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  val url = intent.getStringExtra("url")
+                  if (url == null) { finish(); return }
+                  val view = PlayerView(this)
+                  view.setBackgroundColor(0xFF000000.toInt())
+                  setContentView(view)
+                  val p = ExoPlayer.Builder(this).build()
+                  p.addListener(object : Player.Listener {
+                      override fun onPlayerError(error: PlaybackException) {
+                          Toast.makeText(
+                              this@PlayerActivity,
+                              "Can't play this stream (" + error.errorCodeName + ")",
+                              Toast.LENGTH_LONG
+                          ).show()
+                      }
+                  })
+                  view.player = p
+                  p.setMediaItem(MediaItem.fromUri(url))
+                  p.prepare()
+                  p.playWhenReady = true
+                  player = p
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  player?.release()
+                  player = null
+                  finish()
+              }
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK as a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Icebox TV build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
